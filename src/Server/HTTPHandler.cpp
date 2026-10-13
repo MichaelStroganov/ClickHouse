@@ -91,6 +91,7 @@ namespace Setting
     extern const SettingsBool http_write_exception_in_output_format;
     extern const SettingsInt64 http_zlib_compression_level;
     extern const SettingsUInt64 input_format_max_block_wait_ms;
+    extern const SettingsUInt64 max_query_size;
     extern const SettingsUInt64 readonly;
     extern const SettingsBool run_query_in_background;
     extern const SettingsBool send_progress_in_http_headers;
@@ -462,17 +463,6 @@ void HTTPHandler::processQuery(
     {
         context->setHTTPHandlerName(introspection_handler_name);
 
-        /// The query a SQL-defined handler executes is the server's own stored text, parsed and validated
-        /// when the handler was created (possibly in a session with raised parser limits) and re-parsed
-        /// with unlimited limits on every reload (see `SQLDefinedHandlersMetadataStorage::readHandler`).
-        /// Parse it with unlimited depth and backtracks (`0` disables the limit) here too, so a handler
-        /// that was accepted at creation stays invokable under ordinary session limits instead of failing
-        /// each request until the caller raises `max_parser_depth` / `max_parser_backtracks` themselves.
-        /// The client controls only the typed query parameters, never the query text, and could raise
-        /// these settings per-request anyway (they are changeable under `readonly = 2`); `parseQuery`
-        /// still guards against stack overflow via `checkStackSize`.
-        context->setSetting("max_parser_depth", Field(0));
-        context->setSetting("max_parser_backtracks", Field(0));
     }
 
     /// === Authentication and user profile are applied first ===
@@ -507,6 +497,16 @@ void HTTPHandler::processQuery(
 
     context->checkSettingsConstraints(settings_changes, SettingSource::QUERY);
     context->applySettingsChanges(settings_changes);
+
+    /// The query a SQL-defined handler executes is the server's own stored text, parsed and validated
+    /// when the handler was created (possibly in a session with raised parser limits) and re-parsed
+    /// with unlimited limits on every reload (see `SQLDefinedHandlersMetadataStorage::readHandler`).
+    /// The parser limits are not zeroed on the query context here: `executeQuery` lifts them only for
+    /// the stored text itself via the `parse_server_owned_query_without_limits` flag (`has_server_owned_query`
+    /// is set by `PredefinedQueryHandler`, from which `SQLDefinedQueryHandler` inherits), so the
+    /// request-controlled construction snippets (`select`/`filter`/`order`/`page`) keep the caller's limits. The
+    /// same flag also pins the stored text to the ClickHouse SQL parser, so a request cannot make the handler
+    /// unparsable by asking for another `dialect`.
 
     /// The `X-ClickHouse-Format` header is an alias for the `output_format` setting, or - when
     /// `http_x_clickhouse_format_overrides_output_format` is disabled - for the `default_format`
@@ -1480,6 +1480,7 @@ void HTTPHandler::processQuery(
     };
     query_flags.parse_query_from_initial_buffer
         = settings[Setting::input_format_max_block_wait_ms] != 0 && url_query_starts_with_insert();
+    query_flags.parse_server_owned_query_without_limits = has_server_owned_query;
 
     executeQuery(
         std::move(in),
@@ -1870,6 +1871,7 @@ PredefinedQueryHandler::PredefinedQueryHandler(
     , url_regexp(url_regexp_)
     , header_name_with_capture_regexp(header_name_with_regexp_)
 {
+    setHasServerOwnedQuery();
     /// A predefined handler runs a fixed query, so whether the body can be read at all is known in advance
     /// (computed once by `createPredefinedHandlerFactory`). A SQL-defined handler overrides this with its full
     /// body contract in `SQLDefinedQueryHandler`.
@@ -2117,9 +2119,9 @@ HTTPRequestHandlerFactoryPtr createPredefinedHandlerFactory(IServer & server,
     /// particular a `DELETE`, which is otherwise presented to the handler as an empty body stream) must be
     /// rejected with `411 Length Required` instead of running the query with a silently dropped body. Parse the
     /// configured query once and use the resulting AST for both body analysis and receive-parameter analysis.
-    /// The query text is server-owned, so parse it without depth and backtrack limits, like the stored query of
-    /// an SQL-defined handler: the user's `max_parser_depth` / `max_parser_backtracks` still apply when the query
-    /// is executed, and a handler that works under raised limits must not prevent startup or config reload.
+    /// The query text is server-owned, so parse it without depth and backtrack limits, just as it is parsed when
+    /// the handler serves a request (see `parse_server_owned_query_without_limits`), so a handler accepted with
+    /// raised limits does not prevent startup or config reload.
     const char * query_begin = predefined_query.data();
     const char * query_end = query_begin + predefined_query.size();
     ParserQuery parser(query_end);
