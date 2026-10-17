@@ -436,6 +436,17 @@ def test_predefined_query_handler():
             "SELECT data FROM test_table WHERE id = 101"
         ) == "INLINE\n"
 
+        # Inline FORMAT data for input() must not conflict with a separately bound POST body.
+        res_inline_input = cluster.instance.http_request(
+            "test_predefined_handler_inline_input_and_request_body",
+            method="POST",
+            data=b"inline-token",
+        )
+        assert res_inline_input.status_code == 200, res_inline_input.content
+        assert cluster.instance.query(
+            "SELECT data FROM test_table WHERE id = 102"
+        ) == "inline-token\n"
+
         for content_type in (
             "application/x-www-form-urlencoded",
             "Application/X-WWW-Form-Urlencoded",

@@ -2168,11 +2168,12 @@ PredefinedQueryAnalysis analyzePredefinedQuery(
             config_prefix);
     }
 
-    /// Config-defined plain INSERTs retain their inline VALUES/FORMAT data. In that case,
-    /// binding `_request_body` does not consume the data needed by the INSERT.
+    /// Config-defined INSERTs retain their inline VALUES/FORMAT data, including
+    /// INSERT ... SELECT FROM input(). Binding `_request_body` does not consume
+    /// the data already present in the configured query.
     const auto * insert_query = predefined_query_ast->as<ASTInsertQuery>();
     if (query_consumes_request_body && binds_request_body
-        && !(insert_query && !insert_query->select && insert_query->hasInlinedData()))
+        && !(insert_query && insert_query->hasInlinedData()))
     {
         throw Exception(
             ErrorCodes::BAD_ARGUMENTS,
