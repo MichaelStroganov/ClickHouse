@@ -451,6 +451,27 @@ def test_predefined_query_handler():
 
         cluster.instance.query("DROP TABLE test_table")
 
+        # The configured DELETE route must remain usable for session temporary tables.
+        # A query-kind-only startup check would reject DROP even though readonly = 2 allows it.
+        session_id = "predefined_temp_table_delete"
+        create_temp = cluster.instance.http_request(
+            f"test_predefined_handler_create_temporary?session_id={session_id}",
+            method="POST",
+        )
+        assert create_temp.status_code == 200, create_temp.content
+
+        drop_temp = cluster.instance.http_request(
+            f"test_predefined_handler_drop_temporary?session_id={session_id}",
+            method="DELETE",
+        )
+        assert drop_temp.status_code == 200, drop_temp.content
+
+        drop_again = cluster.instance.http_request(
+            f"test_predefined_handler_drop_temporary?session_id={session_id}",
+            method="DELETE",
+        )
+        assert drop_again.status_code != 200, drop_again.content
+
         cluster.instance.http_request(
             "test_predefined_handler_get?max_threads=1&param_setting_name=max_threads",
             method="GET",

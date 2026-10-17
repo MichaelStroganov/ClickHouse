@@ -73,6 +73,23 @@
                 <query>SELECT {value:UInt32}</query>
             </handler>
         </rule>
+        <!-- A DELETE-only handler may modify an existing session temporary table under readonly = 2. -->
+        <rule>
+            <methods>POST</methods>
+            <url>/test_predefined_handler_create_temporary</url>
+            <handler>
+                <type>predefined_query_handler</type>
+                <query>CREATE TEMPORARY TABLE test_predefined_temp (id UInt32) ENGINE = Memory</query>
+            </handler>
+        </rule>
+        <rule>
+            <methods>DELETE</methods>
+            <url>/test_predefined_handler_drop_temporary</url>
+            <handler>
+                <type>predefined_query_handler</type>
+                <query>DROP TEMPORARY TABLE test_predefined_temp</query>
+            </handler>
+        </rule>
         <rule>
             <methods>POST</methods>
             <url>/test_predefined_handler_post_form_body</url>

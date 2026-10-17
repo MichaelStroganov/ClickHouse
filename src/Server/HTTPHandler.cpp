@@ -2183,38 +2183,9 @@ PredefinedQueryAnalysis analyzePredefinedQuery(
 
     const bool query_may_consume_request_body = query_consumes_request_body || binds_request_body;
 
-    /// Keep existing configurations with no method filter or mixed GET/POST methods working:
-    /// a body parameter on a POST does not make the entire configured route invalid. The HTTP
-    /// handler enforces body framing per request; only the readonly policy below needs method flags.
-    const auto methods_path = config_prefix + ".methods";
-    bool has_post_method = false;
-    bool has_put_or_delete_method = false;
-    if (config.has(methods_path))
-    {
-        Poco::StringTokenizer methods(config.getString(methods_path), ",", Poco::StringTokenizer::TOK_TRIM);
-        for (const auto & method : methods)
-        {
-            const auto normalized_method = Poco::toUpper(method);
-            if (normalized_method == Poco::Net::HTTPRequest::HTTP_POST)
-                has_post_method = true;
-            else if (normalized_method == Poco::Net::HTTPRequest::HTTP_PUT
-                || normalized_method == Poco::Net::HTTPRequest::HTTP_DELETE)
-                has_put_or_delete_method = true;
-        }
-    }
-
-    /// Config-defined handlers run `PUT` and `DELETE` in `readonly` mode (see `setReadOnlyIfHTTPMethodIdempotent`),
-    /// so any query that requires a mutating method needs a `POST` route, even without a request body.
-    /// This does not change body requirements. A rule with no method filter already accepts `POST`.
-    if (has_put_or_delete_method && !has_post_method && queryRequiresMutatingHTTPMethod(*predefined_query_ast))
-    {
-        throw Exception(
-            ErrorCodes::BAD_ARGUMENTS,
-            "Configured predefined query handler `{}` runs a query that modifies data, but its <methods> do not "
-            "include POST. Configured handlers execute PUT and DELETE requests in readonly mode, so the query "
-            "could never succeed. Add POST to <methods>.",
-            config_prefix);
-    }
+    /// A query that modifies session temporary tables can succeed under readonly = 2. Do not infer
+    /// which configured HTTP methods can execute it at startup; enforce readonly for each request.
+    /// The checks above only reject body-input combinations that are always invalid.
 
     return {std::move(analyze_receive_params), query_may_consume_request_body};
 }
