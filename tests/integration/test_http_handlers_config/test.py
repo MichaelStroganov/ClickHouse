@@ -424,6 +424,18 @@ def test_predefined_query_handler():
         assert res3.status_code == 200
         assert cluster.instance.query("SELECT * FROM test_table") == "100\tTEST\n"
 
+        # An existing inline-data INSERT may bind the POST body as a query parameter.
+        # Validation must not reject this handler during server startup.
+        res_inline = cluster.instance.http_request(
+            "test_predefined_handler_inline_insert_and_request_body",
+            method="POST",
+            data=b"dedup-token",
+        )
+        assert res_inline.status_code == 200, res_inline.content
+        assert cluster.instance.query(
+            "SELECT data FROM test_table WHERE id = 101"
+        ) == "INLINE\n"
+
         for content_type in (
             "application/x-www-form-urlencoded",
             "Application/X-WWW-Form-Urlencoded",
