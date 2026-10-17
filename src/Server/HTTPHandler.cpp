@@ -937,11 +937,14 @@ void HTTPHandler::processQuery(
     /// The data can also be compressed using incompatible internal algorithm. This is indicated by
     /// 'decompress' query parameter.
     std::unique_ptr<ReadBuffer> in_post_maybe_compressed;
-    bool is_in_post_compressed = false;
     if (params.getParsedLast<bool>("decompress", false))
     {
-        in_post_maybe_compressed = std::make_unique<CompressedReadBuffer>(std::move(in_post), /* allow_different_codecs_ = */ false, /* external_data_ = */ true);
-        is_in_post_compressed = true;
+        auto compressed_body = std::make_unique<CompressedReadBuffer>(
+            std::move(in_post), /* allow_different_codecs_ = */ false, /* external_data_ = */ true);
+        /// Apply the checksum policy before any body read, including the path-upload eof() probe.
+        if (settings[Setting::http_native_compression_disable_checksumming_on_decompress])
+            compressed_body->disableChecksumming();
+        in_post_maybe_compressed = std::move(compressed_body);
     }
     else
     {
@@ -1124,11 +1127,6 @@ void HTTPHandler::processQuery(
 
     used_output.out_holder->setSendProgress(settings[Setting::send_progress_in_http_headers]);
     used_output.out_holder->setSendProgressInterval(settings[Setting::http_headers_progress_interval_ms]);
-
-    /// If 'http_native_compression_disable_checksumming_on_decompress' setting is turned on,
-    /// checksums of client data compressed with internal algorithm are not checked.
-    if (is_in_post_compressed && settings[Setting::http_native_compression_disable_checksumming_on_decompress])
-        static_cast<CompressedReadBuffer &>(*in_post_maybe_compressed).disableChecksumming();
 
     /// Add CORS header if 'add_http_cors_header' setting is turned on send * in Access-Control-Allow-Origin
     /// Note that whether the header is added is determined by the settings, and we can only get the user settings after authentication.

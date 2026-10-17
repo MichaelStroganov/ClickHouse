@@ -130,6 +130,21 @@ ${CLICKHOUSE_CLIENT} -q "SELECT count() FROM ${DB}.${TABLE} WHERE a = 16" | grep
 echo "-- inserted rows after compressed and framed uploads"
 ${CLICKHOUSE_CLIENT} -q "SELECT * FROM ${DB}.${TABLE} ORDER BY a"
 
+echo "-- native-compressed PUT respects disabled checksum verification"
+${CLICKHOUSE_CURL} -sS "${CLICKHOUSE_URL}&compress=1" \
+    -d "SELECT concat('17,\"native-checksum\"', char(10)) FORMAT RawBLOB" \
+    | python3 -c '
+import sys
+
+body = sys.stdin.buffer.read()
+if len(body) <= 25:
+    raise ValueError("Expected a native-compressed block")
+sys.stdout.buffer.write(bytes(16) + body[16:])
+' \
+    | curl -sS -X PUT -H 'Content-Type: text/csv' --data-binary @- \
+        "${BASE_URL}/${DB}/${TABLE}.CSV?decompress=1&http_native_compression_disable_checksumming_on_decompress=1"
+${CLICKHOUSE_CLIENT} -q "SELECT count() FROM ${DB}.${TABLE} WHERE a = 17 AND b = 'native-checksum'" | grep -qx '1'
+
 echo "-- quoted table names with filter characters support upload suffixes"
 printf '42,"quoted"\n' \
     | curl -sS -X PUT -H 'Content-Type: text/csv' --data-binary @- \
