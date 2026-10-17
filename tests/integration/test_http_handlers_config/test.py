@@ -447,6 +447,33 @@ def test_predefined_query_handler():
             "SELECT data FROM test_table WHERE id = 102"
         ) == "inline-token\n"
 
+        # _request_body is already bound by the URL, so it must not drain streamed INSERT rows.
+        # Loading this handler during server startup must also succeed.
+        res_streamed = cluster.instance.http_request(
+            "test_predefined_handler_streamed_insert_and_request_body"
+            "?param__request_body=stream-token",
+            method="POST",
+            data=b"\n103,STREAMED\n",
+            headers={"Content-Type": "text/plain"},
+        )
+        assert res_streamed.status_code == 200, res_streamed.content
+        assert cluster.instance.query(
+            "SELECT data FROM test_table WHERE id = 103"
+        ) == "STREAMED\n"
+
+        # Without that binding, consuming the body to populate _request_body must fail.
+        res_conflict = cluster.instance.http_request(
+            "test_predefined_handler_streamed_insert_and_request_body",
+            method="POST",
+            data=b"\n104,SHOULD_NOT_INSERT\n",
+            headers={"Content-Type": "text/plain"},
+        )
+        assert res_conflict.status_code != 200, res_conflict.content
+        assert b"BAD_ARGUMENTS" in res_conflict.content
+        assert cluster.instance.query(
+            "SELECT count() FROM test_table WHERE id = 104"
+        ) == "0\n"
+
         for content_type in (
             "application/x-www-form-urlencoded",
             "Application/X-WWW-Form-Urlencoded",

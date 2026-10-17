@@ -1886,18 +1886,32 @@ PredefinedQueryHandler::PredefinedQueryHandler(
     const CompiledRegexPtr & url_regexp_,
     const std::unordered_map<String, CompiledRegexPtr> & header_name_with_regexp_,
     const HTTPResponseHeaderSetup & http_response_headers_override_,
-    bool query_may_consume_request_body_)
+    bool query_may_consume_request_body_,
+    bool reject_unbound_request_body_)
     : HTTPHandler(server_, connection_config, "PredefinedQueryHandler", http_response_headers_override_)
     , receive_params(receive_params_)
     , predefined_query(predefined_query_)
     , url_regexp(url_regexp_)
     , header_name_with_capture_regexp(header_name_with_regexp_)
+    , reject_unbound_request_body(reject_unbound_request_body_)
 {
     setHasServerOwnedQuery();
     /// A predefined handler runs a fixed query, so whether the body can be read at all is known in advance
     /// (computed once by `createPredefinedHandlerFactory`). A SQL-defined handler overrides this with its full
     /// body contract in `SQLDefinedQueryHandler`.
     setConfigQueryMayConsumeRequestBody(query_may_consume_request_body_);
+}
+
+void PredefinedQueryHandler::checkRequestBodyParameterConflict() const
+{
+    if (reject_unbound_request_body)
+    {
+        throw Exception(
+            ErrorCodes::BAD_ARGUMENTS,
+            "A predefined INSERT handler cannot bind an unbound `_request_body` from the HTTP request body "
+            "while using that same body as input data. Supply `_request_body` through a URL parameter or "
+            "header/path capture instead.");
+    }
 }
 
 bool PredefinedQueryHandler::customizeQueryParam(NameToNameMap & query_parameters, const std::string & key, const std::string & value)
@@ -1967,6 +1981,7 @@ void PredefinedQueryHandler::customizeContext(HTTPServerRequest & request, Conte
 
     if (unlikely(receive_params.contains("_request_body") && !context->getQueryParameters().contains("_request_body")))
     {
+        checkRequestBodyParameterConflict();
         WriteBufferFromOwnString value;
         const auto & settings = context->getSettingsRef();
 
@@ -1987,6 +2002,7 @@ std::string PredefinedQueryHandler::getQuery(HTTPServerRequest & request, HTMLFo
     /// limit `customizeContext` applies when it reads the body itself.
     const auto & preserve_raw_body = [&]
     {
+        checkRequestBodyParameterConflict();
         WriteBufferFromOwnString value;
         copyDataMaxBytes(body, value, context->getSettingsRef()[Setting::http_max_request_param_data_size]);
         context->setQueryParameter("_request_body", value.str());
@@ -2125,6 +2141,7 @@ struct PredefinedQueryAnalysis
 {
     NameSet receive_params;
     bool may_consume_request_body;
+    bool reject_unbound_request_body;
 };
 
 /// Validate the configured query once, before the factory starts routing requests.
@@ -2155,9 +2172,8 @@ PredefinedQueryAnalysis analyzePredefinedQuery(
     const bool query_consumes_request_body = queryConsumesRequestBody(*predefined_query_ast);
     const bool binds_request_body = analyze_receive_params.contains("_request_body");
 
-    /// Keep config-defined handlers subject to the same body-input checks as SQL-defined handlers. A wrapped
-    /// body-reading query would silently lose its data, while binding `_request_body` alongside a query input
-    /// would consume the single request body before the query could read it.
+    /// A wrapper cannot forward the HTTP request body to its contained statement. The separate
+    /// `_request_body` input conflict depends on the request's parameter bindings (handled below).
     if (queryWrapsBodyConsumingStatement(*predefined_query_ast))
     {
         throw Exception(
@@ -2168,21 +2184,12 @@ PredefinedQueryAnalysis analyzePredefinedQuery(
             config_prefix);
     }
 
-    /// Config-defined INSERTs retain their inline VALUES/FORMAT data, including
-    /// INSERT ... SELECT FROM input(). Binding `_request_body` does not consume
-    /// the data already present in the configured query.
+    /// A body-reading INSERT can also use `_request_body` when the parameter is supplied
+    /// by the URL or a named capture. Only reject requests that would bind the parameter
+    /// from the same body stream. Inline VALUES/FORMAT data never conflict with this binding.
     const auto * insert_query = predefined_query_ast->as<ASTInsertQuery>();
-    if (query_consumes_request_body && binds_request_body
-        && !(insert_query && insert_query->hasInlinedData()))
-    {
-        throw Exception(
-            ErrorCodes::BAD_ARGUMENTS,
-            "Configured predefined query handler `{}` runs a query that takes its data from the HTTP request body "
-            "and also uses the `_request_body` parameter. Binding `_request_body` consumes the request body before "
-            "the query reads its input data, so the uploaded data would be silently lost. Use either the query's own "
-            "body input or the `_request_body` parameter, not both.",
-            config_prefix);
-    }
+    const bool reject_unbound_request_body = query_consumes_request_body && binds_request_body
+        && !(insert_query && insert_query->hasInlinedData());
 
     const bool query_may_consume_request_body = query_consumes_request_body || binds_request_body;
 
@@ -2190,7 +2197,7 @@ PredefinedQueryAnalysis analyzePredefinedQuery(
     /// which configured HTTP methods can execute it at startup; enforce readonly for each request.
     /// The checks above only reject body-input combinations that are always invalid.
 
-    return {std::move(analyze_receive_params), query_may_consume_request_body};
+    return {std::move(analyze_receive_params), query_may_consume_request_body, reject_unbound_request_body};
 }
 }
 
@@ -2208,7 +2215,7 @@ HTTPRequestHandlerFactoryPtr createPredefinedHandlerFactory(IServer & server,
     /// This prevents whitespace from being interpreted as data for binary formats like MsgPack.
     boost::algorithm::trim(predefined_query);
 
-    auto [analyze_receive_params, query_may_consume_request_body]
+    auto [analyze_receive_params, query_may_consume_request_body, reject_unbound_request_body]
         = analyzePredefinedQuery(config_prefix, predefined_query);
 
     HTTPHandlerConnectionConfig connection_config(config, config_prefix);
@@ -2234,7 +2241,8 @@ HTTPRequestHandlerFactoryPtr createPredefinedHandlerFactory(IServer & server,
         headers_name_with_regexp = std::move(regexps.headers_name_with_regexp),
         http_response_headers_override,
         connection_config,
-        query_may_consume_request_body]
+        query_may_consume_request_body,
+        reject_unbound_request_body]
         -> std::unique_ptr<PredefinedQueryHandler>
     {
         return std::make_unique<PredefinedQueryHandler>(
@@ -2245,7 +2253,8 @@ HTTPRequestHandlerFactoryPtr createPredefinedHandlerFactory(IServer & server,
             url_regexp,
             headers_name_with_regexp,
             http_response_headers_override,
-            query_may_consume_request_body);
+            query_may_consume_request_body,
+            reject_unbound_request_body);
     };
     auto factory = std::make_shared<HandlingRuleHTTPHandlerFactory<PredefinedQueryHandler>>(std::move(creator));
     factory->addFiltersFromConfig(config, config_prefix);

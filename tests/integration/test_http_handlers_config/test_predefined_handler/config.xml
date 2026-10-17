@@ -52,6 +52,15 @@
 102</query>
             </handler>
         </rule>
+        <!-- Streamed INSERT data stays available when _request_body is bound by the URL. -->
+        <rule>
+            <methods>POST</methods>
+            <url>/test_predefined_handler_streamed_insert_and_request_body</url>
+            <handler>
+                <type>predefined_query_handler</type>
+                <query>INSERT INTO test_table (id, data) SETTINGS insert_deduplication_token={_request_body:String} FORMAT CSV</query>
+            </handler>
+        </rule>
         <!-- Legacy predefined handlers can bind the body on POST even without a method filter. -->
         <rule>
             <url>/test_predefined_handler_body_no_methods</url>

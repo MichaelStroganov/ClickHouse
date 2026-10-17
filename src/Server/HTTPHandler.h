@@ -304,6 +304,9 @@ private:
     std::string predefined_query;
     CompiledRegexPtr url_regexp;
     std::unordered_map<String, CompiledRegexPtr> header_name_with_capture_regexp;
+    bool reject_unbound_request_body;
+
+    void checkRequestBodyParameterConflict() const;
 
 public:
     PredefinedQueryHandler(
@@ -314,7 +317,8 @@ public:
         const CompiledRegexPtr & url_regexp_,
         const std::unordered_map<String, CompiledRegexPtr> & header_name_with_regexp_,
         const HTTPResponseHeaderSetup & http_response_headers_override_ = std::nullopt,
-        bool query_may_consume_request_body_ = false);
+        bool query_may_consume_request_body_ = false,
+        bool reject_unbound_request_body_ = false);
 
     void customizeContext(HTTPServerRequest & request, ContextMutablePtr context, ReadBuffer & body) override;
 
