@@ -33,6 +33,22 @@
                 <query>INSERT INTO test_table(id, data) SELECT {id:UInt32}, {_request_body:String}</query>
             </handler>
         </rule>
+        <!-- Legacy predefined handlers can bind the body on POST even without a method filter. -->
+        <rule>
+            <url>/test_predefined_handler_body_no_methods</url>
+            <handler>
+                <type>predefined_query_handler</type>
+                <query>SELECT {_request_body:String}</query>
+            </handler>
+        </rule>
+        <rule>
+            <methods>GET,POST</methods>
+            <url>/test_predefined_handler_body_get_post</url>
+            <handler>
+                <type>predefined_query_handler</type>
+                <query>SELECT {_request_body:String}</query>
+            </handler>
+        </rule>
         <rule>
             <methods>DELETE</methods>
             <url>/test_predefined_handler_delete_body</url>

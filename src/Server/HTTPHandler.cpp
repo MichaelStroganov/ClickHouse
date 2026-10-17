@@ -139,6 +139,13 @@ namespace FailPoints
 
 namespace
 {
+/// POST, PUT, and DELETE may carry a request body. Use the same method set for request
+/// framing and predefined handlers' form parsing.
+bool isBodyCarryingHTTPMethod(const String & method)
+{
+    return method == HTTPRequest::HTTP_POST || method == HTTPRequest::HTTP_PUT || method == HTTPRequest::HTTP_DELETE;
+}
+
 /// Whether the request declares a body that the HTTP handler layer reads by itself, regardless of the query:
 /// Poco's `HTMLForm` loads `application/x-www-form-urlencoded` payloads, and `multipart/form-data` is parsed as
 /// "external data for query processing". Such a body must come with a length on a non-chunked request.
@@ -1717,8 +1724,6 @@ void HTTPHandler::handleRequest(HTTPServerRequest & request, HTTPServerResponse 
         /// `HTTPServerConnection` closes the socket after the response - the unread bytes can never be
         /// misread as the next request on the connection (pinned by 04826_handler_lengthless_body_keep_alive).
         const auto & method = request.getMethod();
-        const bool is_body_carrying_method
-            = method == HTTPRequest::HTTP_POST || method == HTTPRequest::HTTP_PUT || method == HTTPRequest::HTTP_DELETE;
         const bool is_path_table_upload = allowMutatingIdempotentMethods(request, params);
         const bool body_may_be_consumed = body_contract_known
             ? (consumes_request_body || requestDeclaresFormBody(request))
@@ -1727,7 +1732,7 @@ void HTTPHandler::handleRequest(HTTPServerRequest & request, HTTPServerResponse 
                 || method == HTTPRequest::HTTP_PUT
                 || (method == HTTPRequest::HTTP_DELETE && config_query_may_consume_request_body)
                 || requestDeclaresFormBody(request));
-        const bool method_requires_content_length = is_body_carrying_method && body_may_be_consumed;
+        const bool method_requires_content_length = isBodyCarryingHTTPMethod(method) && body_may_be_consumed;
         const bool request_is_unframed = !request.getChunkedTransferEncoding() && !request.hasContentLength();
 
         /// HTTPServerRequest represents an unframed DELETE as a bounded empty stream. If the client sent
@@ -2005,10 +2010,7 @@ std::string PredefinedQueryHandler::getQuery(HTTPServerRequest & request, HTMLFo
         /// not count: a handler whose only body use is `_request_body` gets the raw body instead of form parsing.
         const bool wants_form_body_params = std::any_of(
             receive_params.begin(), receive_params.end(), [](const String & name) { return name != "_request_body"; });
-        const auto & method = request.getMethod();
-        const bool body_carrying_method
-            = method == HTTPRequest::HTTP_POST || method == HTTPRequest::HTTP_PUT || method == HTTPRequest::HTTP_DELETE;
-        if (wants_form_body_params && body_carrying_method)
+        if (wants_form_body_params && isBodyCarryingHTTPMethod(request.getMethod()))
         {
             if (wants_request_body)
             {
@@ -2146,6 +2148,8 @@ HTTPRequestHandlerFactoryPtr createPredefinedHandlerFactory(IServer & server,
         /* max_parser_depth */ 0,
         /* max_parser_backtracks */ 0);
     NameSet analyze_receive_params = analyzeReceiveQueryParams(predefined_query_ast);
+    const bool query_consumes_request_body = queryConsumesRequestBody(*predefined_query_ast);
+    const bool binds_request_body = analyze_receive_params.contains("_request_body");
 
     /// Keep config-defined handlers subject to the same body-input checks as SQL-defined handlers. A wrapped
     /// body-reading query would silently lose its data, while binding `_request_body` alongside a query input
@@ -2160,7 +2164,7 @@ HTTPRequestHandlerFactoryPtr createPredefinedHandlerFactory(IServer & server,
             config_prefix);
     }
 
-    if (queryConsumesRequestBody(*predefined_query_ast) && analyze_receive_params.contains("_request_body"))
+    if (query_consumes_request_body && binds_request_body)
     {
         throw Exception(
             ErrorCodes::BAD_ARGUMENTS,
@@ -2171,48 +2175,26 @@ HTTPRequestHandlerFactoryPtr createPredefinedHandlerFactory(IServer & server,
             config_prefix);
     }
 
-    const bool query_may_consume_request_body
-        = queryConsumesRequestBody(*predefined_query_ast) || analyze_receive_params.contains("_request_body");
+    const bool query_may_consume_request_body = query_consumes_request_body || binds_request_body;
 
-    /// A body-consuming predefined handler must not be reachable through a safe method, or through a rule with no
-    /// method filter. Otherwise a GET request can match the rule and `_request_body` is silently bound to an empty
-    /// value. Config-defined rules do not have the SQL-defined handler's default GET restriction at this point.
+    /// Keep existing configurations with no method filter or mixed GET/POST methods working:
+    /// a body parameter on a POST does not make the entire configured route invalid. The HTTP
+    /// handler enforces body framing per request; only the readonly policy below needs method flags.
     const auto methods_path = config_prefix + ".methods";
-    bool has_only_body_carrying_methods = false;
     bool has_post_method = false;
     bool has_put_or_delete_method = false;
     if (config.has(methods_path))
     {
         Poco::StringTokenizer methods(config.getString(methods_path), ",", Poco::StringTokenizer::TOK_TRIM);
-        has_only_body_carrying_methods
-            = methods.count() > 0
-            && std::all_of(
-                methods.begin(), methods.end(), [](const auto & method)
-                {
-                    const auto normalized_method = Poco::toUpper(method);
-                    return normalized_method == Poco::Net::HTTPRequest::HTTP_POST
-                        || normalized_method == Poco::Net::HTTPRequest::HTTP_PUT
-                        || normalized_method == Poco::Net::HTTPRequest::HTTP_DELETE;
-                });
-        has_post_method = std::any_of(
-            methods.begin(), methods.end(),
-            [](const auto & method) { return Poco::toUpper(method) == Poco::Net::HTTPRequest::HTTP_POST; });
-        has_put_or_delete_method = std::any_of(
-            methods.begin(), methods.end(), [](const auto & method)
-            {
-                const auto normalized_method = Poco::toUpper(method);
-                return normalized_method == Poco::Net::HTTPRequest::HTTP_PUT
-                    || normalized_method == Poco::Net::HTTPRequest::HTTP_DELETE;
-            });
-    }
-
-    if (query_may_consume_request_body && !has_only_body_carrying_methods)
-    {
-        throw Exception(
-            ErrorCodes::BAD_ARGUMENTS,
-            "Configured predefined query handler `{}` may consume the HTTP request body, so its <methods> must list "
-            "only POST, PUT, or DELETE.",
-            config_prefix);
+        for (const auto & method : methods)
+        {
+            const auto normalized_method = Poco::toUpper(method);
+            if (normalized_method == Poco::Net::HTTPRequest::HTTP_POST)
+                has_post_method = true;
+            else if (normalized_method == Poco::Net::HTTPRequest::HTTP_PUT
+                || normalized_method == Poco::Net::HTTPRequest::HTTP_DELETE)
+                has_put_or_delete_method = true;
+        }
     }
 
     /// Config-defined handlers run `PUT` and `DELETE` in `readonly` mode (see `setReadOnlyIfHTTPMethodIdempotent`),

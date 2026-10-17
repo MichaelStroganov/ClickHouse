@@ -437,6 +437,18 @@ def test_predefined_query_handler():
             assert res_form.status_code == 200, (content_type, res_form.content)
             assert b"hello\n" == res_form.content, content_type
 
+        # Existing predefined handlers without a method filter, or with GET alongside POST,
+        # must still load and pass the POST request body to the query.
+        for path in (
+            "test_predefined_handler_body_no_methods",
+            "test_predefined_handler_body_get_post",
+        ):
+            response = cluster.instance.http_request(
+                path, method="POST", data=b"body from post"
+            )
+            assert response.status_code == 200, (path, response.content)
+            assert response.content == b"body from post\n", path
+
         cluster.instance.query("DROP TABLE test_table")
 
         cluster.instance.http_request(
