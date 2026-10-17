@@ -47,6 +47,7 @@
 #include <Common/scope_guard_safe.h>
 #include <Common/setThreadName.h>
 #include <Common/typeid_cast.h>
+#include <Parsers/ASTInsertQuery.h>
 #include <Parsers/ASTSetQuery.h>
 #include <Processors/Formats/Framing/FramingFormatFactory.h>
 #include <Processors/Formats/IOutputFormat.h>
@@ -2167,7 +2168,11 @@ PredefinedQueryAnalysis analyzePredefinedQuery(
             config_prefix);
     }
 
-    if (query_consumes_request_body && binds_request_body)
+    /// Config-defined plain INSERTs retain their inline VALUES/FORMAT data. In that case,
+    /// binding `_request_body` does not consume the data needed by the INSERT.
+    const auto * insert_query = predefined_query_ast->as<ASTInsertQuery>();
+    if (query_consumes_request_body && binds_request_body
+        && !(insert_query && !insert_query->select && insert_query->hasInlinedData()))
     {
         throw Exception(
             ErrorCodes::BAD_ARGUMENTS,
