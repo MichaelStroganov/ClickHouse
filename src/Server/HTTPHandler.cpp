@@ -173,6 +173,21 @@ void validateDynamicHandlerPath(const String & uri)
     }
 }
 
+/// Only table paths with a known format and no path filters can be used as upload destinations.
+void validateHTTPPathUpload(const HTTPPathInfo & path_info)
+{
+    if (path_info.table.empty())
+        throw Exception(ErrorCodes::BAD_ARGUMENTS,
+            "HTTP PUT table uploads require a table path with a known format, for example /database/table.CSV");
+
+    if (path_info.format.empty())
+        throw Exception(ErrorCodes::BAD_ARGUMENTS,
+            "HTTP PUT table uploads require a known format in the URL path, for example /database/table.CSV");
+
+    if (!path_info.path_filters.empty())
+        throw Exception(ErrorCodes::BAD_ARGUMENTS, "HTTP PUT table uploads do not support filters in the URL path");
+}
+
 void addHTTPOptionHeadersFromConfig(HTTPServerResponse & response, const Poco::Util::LayeredConfiguration & config)
 {
     if (!config.has("http_options_response"))
@@ -549,10 +564,9 @@ void HTTPHandler::processQuery(
     HTTPPathInfo path_info;
     const bool allow_table_after_database
         = is_path_table_upload && settings[Setting::http_allow_database_as_path];
-    bool any_path_feature_enabled = settings[Setting::http_allow_database_as_path]
-                                  || settings[Setting::http_allow_table_as_file]
-                                  || settings[Setting::http_allow_filters_as_path]
-                                  || allow_table_after_database;
+    const bool any_path_feature_enabled = settings[Setting::http_allow_database_as_path]
+                                       || settings[Setting::http_allow_table_as_file]
+                                       || settings[Setting::http_allow_filters_as_path];
     if (parsesHTTPPath() && any_path_feature_enabled)
     {
         const String & raw_uri = request.getURI();
@@ -591,16 +605,8 @@ void HTTPHandler::processQuery(
                 allow_table_after_database);
     }
 
-    if (is_path_table_upload && path_info.table.empty())
-        throw Exception(ErrorCodes::BAD_ARGUMENTS,
-            "HTTP PUT table uploads require a table path with a known format, for example /database/table.CSV");
-
-    if (is_path_table_upload && path_info.format.empty())
-        throw Exception(ErrorCodes::BAD_ARGUMENTS,
-            "HTTP PUT table uploads require a known format in the URL path, for example /database/table.CSV");
-
-    if (is_path_table_upload && !path_info.path_filters.empty())
-        throw Exception(ErrorCodes::BAD_ARGUMENTS, "HTTP PUT table uploads do not support filters in the URL path");
+    if (is_path_table_upload)
+        validateHTTPPathUpload(path_info);
 
     /// Resolve the current database from the path and the `database` setting, in that order.
     /// If both are specified and differ, that's an error. We do this *before* `QueryScope::create`
@@ -2114,20 +2120,20 @@ HTTPRequestHandlerFactoryPtr createDynamicHandlerFactory(IServer & server,
     return factory;
 }
 
-HTTPRequestHandlerFactoryPtr createPredefinedHandlerFactory(IServer & server,
-    const Poco::Util::AbstractConfiguration & config,
-    const std::string & config_prefix,
-    std::unordered_map<String, String> & common_headers,
-    const std::optional<String> & default_session_user)
+namespace
 {
-    if (!config.has(config_prefix + ".handler.query"))
-        throw Exception(ErrorCodes::NO_ELEMENTS_IN_CONFIG, "There is no path '{}.handler.query' in configuration file.", config_prefix);
+struct PredefinedQueryAnalysis
+{
+    NameSet receive_params;
+    bool may_consume_request_body;
+};
 
-    std::string predefined_query = config.getString(config_prefix + ".handler.query");
-    /// Remove leading and trailing whitespace that may come from XML formatting in the config file.
-    /// This prevents whitespace from being interpreted as data for binary formats like MsgPack.
-    boost::algorithm::trim(predefined_query);
-
+/// Validate the configured query once, before the factory starts routing requests.
+PredefinedQueryAnalysis analyzePredefinedQuery(
+    const Poco::Util::AbstractConfiguration & config,
+    const String & config_prefix,
+    const String & predefined_query)
+{
     /// Whether this handler's query can read the request body at all. Computed once here, at config load time,
     /// and not per request: the HTTP layer needs it to decide whether an unframed body-carrying request (in
     /// particular a `DELETE`, which is otherwise presented to the handler as an empty body stream) must be
@@ -2209,6 +2215,27 @@ HTTPRequestHandlerFactoryPtr createPredefinedHandlerFactory(IServer & server,
             "could never succeed. Add POST to <methods>.",
             config_prefix);
     }
+
+    return {std::move(analyze_receive_params), query_may_consume_request_body};
+}
+}
+
+HTTPRequestHandlerFactoryPtr createPredefinedHandlerFactory(IServer & server,
+    const Poco::Util::AbstractConfiguration & config,
+    const std::string & config_prefix,
+    std::unordered_map<String, String> & common_headers,
+    const std::optional<String> & default_session_user)
+{
+    if (!config.has(config_prefix + ".handler.query"))
+        throw Exception(ErrorCodes::NO_ELEMENTS_IN_CONFIG, "There is no path '{}.handler.query' in configuration file.", config_prefix);
+
+    std::string predefined_query = config.getString(config_prefix + ".handler.query");
+    /// Remove leading and trailing whitespace that may come from XML formatting in the config file.
+    /// This prevents whitespace from being interpreted as data for binary formats like MsgPack.
+    boost::algorithm::trim(predefined_query);
+
+    auto [analyze_receive_params, query_may_consume_request_body]
+        = analyzePredefinedQuery(config, config_prefix, predefined_query);
 
     HTTPHandlerConnectionConfig connection_config(config, config_prefix);
     connection_config.default_session_user = default_session_user;
