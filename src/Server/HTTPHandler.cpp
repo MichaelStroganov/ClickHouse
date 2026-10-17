@@ -2130,7 +2130,6 @@ struct PredefinedQueryAnalysis
 
 /// Validate the configured query once, before the factory starts routing requests.
 PredefinedQueryAnalysis analyzePredefinedQuery(
-    const Poco::Util::AbstractConfiguration & config,
     const String & config_prefix,
     const String & predefined_query)
 {
@@ -2206,7 +2205,7 @@ HTTPRequestHandlerFactoryPtr createPredefinedHandlerFactory(IServer & server,
     boost::algorithm::trim(predefined_query);
 
     auto [analyze_receive_params, query_may_consume_request_body]
-        = analyzePredefinedQuery(config, config_prefix, predefined_query);
+        = analyzePredefinedQuery(config_prefix, predefined_query);
 
     HTTPHandlerConnectionConfig connection_config(config, config_prefix);
     connection_config.default_session_user = default_session_user;
